@@ -26,11 +26,16 @@ sendrecv.
 '''
 
 PIPELINE_DESC_WITHOUT_WEBRTC = '''
+webrtcbin name=sendrecv latency=1 bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302 
  appsrc name=source emit-signals=True is-live=True caps=video/x-raw,format=I420,width=640,height=480,framerate=10/1 ! 
- queue max-size-buffers=4 ! videoconvert ! autovideosink 
+ queue max-size-buffers=4 ! videoconvert ! video/x-raw,format=I420 !
+ x264enc ! video/x-h264,profile=baseline,bitrate=0,gop-size=-1,qos=True,preset=hp !
+ h264parse ! rtph264pay ! queue max-size-buffers=1 ! application/x-rtp,media=video,encoding-name=H264,payload=123 !
+ sendrecv.
 '''
 
 start_pipeline = True
+is_push_buffer_allowed = True
 VIDEO_FORMAT = "RGB"
 WIDTH, HEIGHT = 640, 480
 FPS = '30/1'
@@ -64,6 +69,7 @@ def new_buffer(sink, data):
     arr = gst_to_opencv(sample)
     image_arr = arr
     return Gst.FlowReturn.OK
+
 
 class WebRTCClient:
     def __init__(self, id_, peer_id, server):
@@ -131,10 +137,10 @@ class WebRTCClient:
             q = Gst.ElementFactory.make('queue')
             conv = Gst.ElementFactory.make('videoconvert')
 
-            sink = Gst.ElementFactory.make('appsink')
-            sink.set_property('sync', False)
+            sink = Gst.ElementFactory.make('autovideosink')
+            #sink.set_property('sync', False)
             #sink.set_property("emit-signals", True)
-            #ssink.connect("new-sample", new_buffer, sink)
+            #sink.connect("new-sample", new_buffer, sink)
 
             q.set_property('leaky', 'downstream')
             self.pipe.add(q)
@@ -172,9 +178,37 @@ class WebRTCClient:
         decodebin.sync_state_with_parent()
         self.webrtc.link(decodebin)
 
+
+    def push(self, data):
+        global is_push_buffer_allowed
+        if is_push_buffer_allowed:
+            data1 = data.tobytes()
+            buf = Gst.Buffer.new_allocate(None, len(data1), None)
+            buf.fill(0, data1)
+            # Create GstSample
+            sample = Gst.Sample.new(buf, Gst.caps_from_string("video/x-raw,format=RGB,width=640,height=480,framerate=(fraction)30/1"), None, None)
+            # Push Sample on appsrc
+            gst_flow_return = self.appsrc.emit('push-sample', sample)
+            print("--------push")
+            if gst_flow_return != Gst.FlowReturn.OK:
+                print('We got some error, stop sending data')
+        else:
+            #pass
+            print('It is enough data for buffer....')
+
+    def start_feed(self, src, length):
+        print("start feed")
+        print("src", src)
+        print("length", length)
+        self.push(image_arr)
+
+    def stop_feed(self):
+        print("stop feed")
+        global is_push_buffer_allowed
+        is_push_buffer_allowed = False
+
     def start_pipeline(self):
-        self.pipe = Gst.parse_launch(PIPELINE_DESC)
-        
+        self.pipe = Gst.parse_launch(PIPELINE_DESC_WITHOUT_WEBRTC)
         self.webrtc = self.pipe.get_by_name('sendrecv')
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
         self.webrtc.connect('on-ice-candidate', self.send_ice_candidate_message)
@@ -185,6 +219,14 @@ class WebRTCClient:
         #appsrc.set_property("block", True)
         #appsrc.emit("push-buffer", ndarray_to_gst_buffer(image_arr))
         #appsrc.emit("end-of-stream")
+
+        self.appsrc = self.pipe.get_by_name('source')
+        self.appsrc.set_property("format", Gst.Format.TIME)
+        self.appsrc.set_property('emit-signals', True)
+        self.appsrc.set_property('max-bytes', 1000000)
+        self.appsrc.set_property('do-timestamp', True)
+        self.appsrc.connect('need-data', self.start_feed)
+        self.appsrc.connect('enough-data', self.stop_feed)
         self.pipe.set_state(Gst.State.PLAYING)
         
         
