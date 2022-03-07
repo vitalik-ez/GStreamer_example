@@ -14,50 +14,76 @@ import websockets
 import ssl
 import random
 import gi
-
-gi.require_version('Gst', '1.0')
-gi.require_version('GstWebRTC', '1.0')
-gi.require_version('GstSdp', '1.0')
-gi.require_version('GstApp', '1.0')
-
 from websockets.version import version as wsv
 from gi.repository import GstSdp
 from gi.repository import GstWebRTC
 from gi.repository import Gst, GObject, GLib
-
-
-
-
+gi.require_version('Gst', '1.0')
+gi.require_version('GstWebRTC', '1.0')
+gi.require_version('GstSdp', '1.0')
+gi.require_version('GstApp', '1.0')
 detector = pn.Model()
 
 
 # GObject.threads_init()
 
-PIPELINE_DESC = '''
-webrtcbin name=sendrecv latency=1 bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
- videotestsrc is-live=True ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp, media=video, encoding-name=VP8, payload=97 ! sendrecv.
+'''
+webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
+ v4l2src ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !
+ queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+
+webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302 appsrc name=source1 ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+
+appsrc name=source1 ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !
+ queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302 ! sendrecv.
+
+appsrc name=source1 emit-signals=True is-live=True ! webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302 ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
 '''
 
-PIPELINE_RECORD_VIDEO = f'''
-appsrc name = source is-live=True ! queue ! videoconvert ! x264enc ! h264parse ! splitmuxsink name=splitmuxsink max-size-time={int(60 * 1e9)}
+PIPELINE_DESC = '''
+videotestsrc ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
+
+# WebRTC appsrc -> browser
+'''
+PIPELINE_DESCold = '''
+webrtcbin name=sendrecv latency=1 bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302 appsrc name=source1 !
+videoconvert !
+vp8enc deadline=1 ! rtpvp8pay !
+application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+
+'''
+PIPELINE_DESC2_old = '''
+webrtcbin name=sendrecv latency=1 bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
+appsrc name=source1 !
+videorate ! cudaupload ! cudaconvert ! video/x-raw(memory:CUDAMemory),format=I420 !
+nvh264enc ! video/x-h264,profile=baseline,bitrate=0,gop-size=-1,qos=True,preset=hp !
+h264parse ! rtph264pay ! queue max-size-buffers=1 ! application/x-rtp,media=video,encoding-name=H264,payload=123 !
+sendrecv.
+
+'''
+PIPELINE_DESC2 = '''
+webrtcbin name=sendrecv latency=1 bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
+appsrc name=source1 !
+videorate ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 !
+sendrecv.
+
+'''
+
+# queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+# appsrc name=source1 ! queue ! videoconvert ! autovideosink
+PIPELINE_DESC3 = '''
+webrtcbin name=sendrecv latency=1 bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
+ videotestsrc is-live=True ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+'''
+
+PIPELINE_RECORD_VIDEO = '''
+appsrc name=source ! queue ! videoconvert ! x264enc ! mp4mux ! filesink location=video.mp4
 '''
 
 image_arr = None
 sender = None
 pipetmp = None
 caps_global = None
-
-
-video_path = 'videos'
-counter = 0
-
-
-def get_videoname(arg1, arg2):
-    global counter
-    result = f'{video_path}/{counter:06d}.mp4'
-    print(f'Latest: {result}')
-    counter += 1
-    return result
 
 
 class WebRTCClient:
@@ -107,7 +133,23 @@ class WebRTCClient:
         return arr
 
     def process_buffer(self):
+
+        if self.pipe_record_video == None:
+            self.pipe_record_video = Gst.parse_launch(PIPELINE_RECORD_VIDEO)
+            self._src = self.pipe_record_video.get_by_name('source')
+            self._src.set_property('emit-signals', True)
+            # self._src.set_property('leaky-type', 2)
+            # self._src.set_property('max-bytes', 1000)
+            self._src.set_property('max-bytes', 1000000)
+            # self._src.set_property('caps', caps_src)
+            self._src.set_property('format', 'time')
+            self._src.set_property('do-timestamp', True)
+            self._src.connect('need-data', self.start_feed)
+            self._src.connect('enough-data', self.stop_feed)
+            # self.pipe_record_video.set_state(Gst.State.PLAYING)
+
         self.done_processing = False
+
         # detector.posenet_detect(self.arr)
         metadata, self.image_arr = 1, self.arr
         cv2.imwrite("1.jpg", self.image_arr)
@@ -128,28 +170,11 @@ class WebRTCClient:
         '''
         self.done_processing = True
 
-    def init_pipe_record(self):
-        self.pipe_record_video = Gst.parse_launch(
-            PIPELINE_RECORD_VIDEO)
-        self._src = self.pipe_record_video.get_by_name('source')
-        self._src.set_property('emit-signals', True)
-        # self._src.set_property('leaky-type', 2)
-        # self._src.set_property('max-bytes', 1000)
-        self._src.set_property('max-bytes', 1000000)
-        # self._src.set_property('caps', caps_src)
-        self._src.set_property('format', 'time')
-        self._src.set_property('do-timestamp', True)
-        self._src.connect('need-data', self.start_feed)
-        self._src.connect('enough-data', self.stop_feed)
-        split = self.pipe_record_video.get_by_name('splitmuxsink')
-        split.connect('format-location', get_videoname)
-        self.pipe_record_video.set_state(Gst.State.PLAYING)
-
     def new_buffer(self, sink, data):
         time_now = 1000 * time.time()
         real_frame_interval = time_now - self.frame_stamp
         self.frame_stamp = time_now
-        # print("-----------------> Frametime: ", real_frame_interval)
+        print("-----------------> Frametime: ", real_frame_interval)
         sample = sink.emit("pull-sample")
         # and (real_frame_interval >= self.interval_ms)):
         if (self.done_processing is True):
@@ -158,15 +183,11 @@ class WebRTCClient:
             self.arr = cv2.resize(self.arr, (640, 480),
                                   interpolation=cv2.INTER_NEAREST)
             self.arr = cv2.flip(self.arr, 1)
-
-            if self.pipe_record_video == None:
-                self.init_pipe_record()
-
-            metadata, self.image_arr = detector.posenet_detect(self.arr)
-        # threading.Thread(target=self.process_buffer).start()
-        # self.image_arr = self.arr
-        # print("====> Time to process a frame: ",
-        #      ((1000 * time.time()) - a))
+            # print(self.arr)
+            threading.Thread(target=self.process_buffer).start()
+            # self.image_arr = self.arr
+            # print("====> Time to process a frame: ",
+            #      ((1000 * time.time()) - a))
         return Gst.FlowReturn.OK
 
     def start_feed(self, src, length):
@@ -186,7 +207,11 @@ class WebRTCClient:
 
     def push(self, data):
         # print('Push a buffer into the source')
+
         if self.is_push_buffer_allowed:
+            # print('Push allowed')
+            # import cv2
+            # cv2.imwrite("images/1.jpg", data)
             data1 = data.tobytes()
             buf = Gst.Buffer.new_allocate(None, len(data1), None)
             buf.fill(0, data1)
@@ -198,6 +223,7 @@ class WebRTCClient:
 
             if gst_flow_return != Gst.FlowReturn.OK:
                 print('We got some error, stop sending data')
+
         else:
             pass
             # print('It is enough data for buffer....')
@@ -213,6 +239,31 @@ class WebRTCClient:
     async def setup_call(self):
         print('Setup call stage!')
         await self.conn.send('SESSION {}'.format(self.peer_id))
+
+    def send_sdp_offer(self, offer):
+        print('Send SDP offer stage!')
+        text = offer.sdp.as_text()
+        print('Sending offer:\n%s' % text)
+        msg = json.dumps({'sdp': {'type': 'offer', 'sdp': text}})
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(self.conn.send(msg))
+        loop.close()
+
+    def on_offer_created(self, promise, _, __):
+        print('on_offer_created stage!')
+        promise.wait()
+        reply = promise.get_reply()
+        offer = reply.get_value('offer')
+        promise = Gst.Promise.new()
+        self.webrtc.emit('set-local-description', offer, promise)
+        promise.interrupt()
+        self.send_sdp_offer(offer)
+
+    def on_negotiation_needed(self, element):
+        print('on_negotiation_needed stage!')
+        promise = Gst.Promise.new_with_change_func(
+            self.on_offer_created, element, None)
+        element.emit('create-offer', None, promise)
 
     def send_ice_candidate_message(self, _, mlineindex, candidate):
         print('Send ice candidate stage!')
@@ -231,9 +282,10 @@ class WebRTCClient:
         # caps = pad.get_current_caps()
         caps = Gst.caps_from_string(
             "video/x-raw, format=(string){BGR, GRAY8}; video/x-bayer,format=(string){rggb,bggr,grbg,gbrg},framerate=30/1")
-        print("caps", caps)
+        # print(caps.get_structure(0).get_value('format'))
+        # print(caps.get_structure(0).get_value('height'))
+        # print(caps.get_structure(0).get_value('width'))
         name = caps.to_string()
-        print("name", name)
         if name.startswith('video'):
             print("STREAM VIDEO")
             q = Gst.ElementFactory.make('queue')
@@ -244,12 +296,11 @@ class WebRTCClient:
             r = Gst.ElementFactory.make('videorate')
             # r.set_property("max-rate", 30)
             # sink = Gst.ElementFactory.make('autovideosink')
-            sink = Gst.ElementFactory.make('appsink')
-            #sink.set_property("sync", False)
-            #sink.set_property('async-handling', True)
+            sink = Gst.ElementFactory.make('autovideosink')
+            sink.set_property("sync", False)
+            sink.set_property('async-handling', True)
             # q.set_property("max-size-bytes", 65586)
-            
-
+            '''
             sink.set_property("emit-signals", True)
             sink.set_property("enable-last-sample", False)
             sink.set_property("sync", False)
@@ -257,8 +308,9 @@ class WebRTCClient:
             sink.set_property("async", True)
             sink.set_property("max-buffers", 2)
             # sink.set_property("max-lateness", 66000000)
-            sink.set_property("caps", caps)
-            
+            sink.set_property("caps", caps) 
+            '''
+
             self.pipe.add(q)
             self.pipe.add(conv)
             # self.pipe.add(r)
@@ -271,7 +323,7 @@ class WebRTCClient:
             # r.link(conv)
             conv.link(sink)
             # r.link(sink)
-            sink.connect("new-sample", self.new_buffer, sink)
+            #sink.connect("new-sample", self.new_buffer, sink)
 
         elif name.startswith('audio'):
             pass
@@ -290,6 +342,44 @@ class WebRTCClient:
         self.pipe.add(decodebin)
         decodebin.sync_state_with_parent()
         self.webrtc.link(decodebin)
+
+    def start_pipeline(self):
+        print('Starting pipeline!')
+
+        # caps_src = Gst.caps_from_string("video/x-raw,format=BGR,width=640,height=480,framerate=(fraction)30/1")
+
+        self.pipe = Gst.parse_launch(PIPELINE_DESC3)
+        self.webrtc = self.pipe.get_by_name('sendrecv')
+
+        '''
+        direction = GstWebRTC.WebRTCRTPTransceiverDirection.RECVONLY
+        caps = Gst.caps_from_string(
+            "application/x-rtp,media=video,encoding-name=VP8/9000,payload=96")
+        self.webrtc.emit('add-transceiver', direction, caps)
+        '''
+
+        # self.webrtc.set_property('async-handling', True)
+
+        # self.webrtc.connect('on-negotiation-needed',
+        #                    self.on_negotiation_needed)
+        # self.webrtc.connect('on-ice-candidate',
+        #                    self.send_ice_candidate_message)
+        # self.webrtc.connect('pad-added', self.on_incoming_stream)
+
+        '''
+        self._src = self.pipe.get_by_name('source1')
+        self._src.set_property('emit-signals', True)
+        # self._src.set_property('leaky-type', 2)
+        # self._src.set_property('max-bytes', 1000)
+        self._src.set_property('max-bytes', 1000000)
+        # self._src.set_property('caps', caps_src)
+        self._src.set_property('format', 'time')
+        self._src.set_property('do-timestamp', True)
+        self._src.connect('need-data', self.start_feed)
+        self._src.connect('enough-data', self.stop_feed)
+        '''
+
+        # self.pipe.set_state(Gst.State.PLAYING)
 
     def send_sdp_to_peer(self, answer):
         print('Send SDP answer stage!')
@@ -344,7 +434,7 @@ class WebRTCClient:
             sdp = sdp['sdp']
             print('Received offer:\n%s' % sdp)
 
-            self.pipe = Gst.parse_launch(PIPELINE_DESC)
+            self.pipe = Gst.parse_launch(PIPELINE_DESC3)
             self.webrtc = self.pipe.get_by_name('sendrecv')
             self.webrtc.connect('on-ice-candidate',
                                 self.send_ice_candidate_message)
@@ -352,6 +442,19 @@ class WebRTCClient:
 
             self.pipe.set_state(Gst.State.PLAYING)
             self.on_offer_received(sdp)
+
+            # self.webrtc.connect('on-ice-candidate',
+            #                    self.send_ice_candidate_message)
+
+            '''
+            res, sdpmsg = GstSdp.SDPMessage.new()
+            GstSdp.sdp_message_parse_buffer(bytes(sdp.encode()), sdpmsg)
+            answer = GstWebRTC.WebRTCSessionDescription.new(
+                GstWebRTC.WebRTCSDPType.ANSWER, sdpmsg)
+            promise = Gst.Promise.new()
+            self.webrtc.emit('set-remote-description', answer, promise)
+            promise.interrupt()
+            '''
 
         elif 'ice' in msg:
             ice = msg['ice']

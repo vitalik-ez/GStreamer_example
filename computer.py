@@ -14,18 +14,15 @@ import websockets
 import ssl
 import random
 import gi
-
-gi.require_version('Gst', '1.0')
-gi.require_version('GstWebRTC', '1.0')
-gi.require_version('GstSdp', '1.0')
-gi.require_version('GstApp', '1.0')
-
 from websockets.version import version as wsv
 from gi.repository import GstSdp
 from gi.repository import GstWebRTC
 from gi.repository import Gst, GObject, GLib
 
-
+gi.require_version('Gst', '1.0')
+gi.require_version('GstWebRTC', '1.0')
+gi.require_version('GstSdp', '1.0')
+gi.require_version('GstApp', '1.0')
 
 
 detector = pn.Model()
@@ -244,11 +241,11 @@ class WebRTCClient:
             r = Gst.ElementFactory.make('videorate')
             # r.set_property("max-rate", 30)
             # sink = Gst.ElementFactory.make('autovideosink')
-            sink = Gst.ElementFactory.make('appsink')
-            #sink.set_property("sync", False)
-            #sink.set_property('async-handling', True)
+            sink = Gst.ElementFactory.make('autovideosink')
+            sink.set_property("sync", False)
+            sink.set_property('async-handling', True)
             # q.set_property("max-size-bytes", 65586)
-            
+            '''
 
             sink.set_property("emit-signals", True)
             sink.set_property("enable-last-sample", False)
@@ -258,12 +255,14 @@ class WebRTCClient:
             sink.set_property("max-buffers", 2)
             # sink.set_property("max-lateness", 66000000)
             sink.set_property("caps", caps)
-            
+                        
+            '''
+
             self.pipe.add(q)
             self.pipe.add(conv)
             # self.pipe.add(r)
             self.pipe.add(sink)
-            self.pipe.sync_children_states()
+            # self.pipe.sync_children_states()
             pad.link(q.get_static_pad('sink'))
             q.link(conv)
             # capsfilter.link(conv)
@@ -271,7 +270,7 @@ class WebRTCClient:
             # r.link(conv)
             conv.link(sink)
             # r.link(sink)
-            sink.connect("new-sample", self.new_buffer, sink)
+            # sink.connect("new-sample", self.new_buffer, sink)
 
         elif name.startswith('audio'):
             pass
