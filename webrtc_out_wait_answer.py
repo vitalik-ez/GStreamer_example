@@ -39,7 +39,9 @@ webrtcbin name=sendrecv latency=1 bundle-policy=max-bundle stun-server=stun://st
 '''
 
 PIPELINE_RECORD_VIDEO = f'''
-appsrc name = source is-live=True ! queue ! videoconvert ! x264enc ! h264parse ! splitmuxsink name=splitmuxsink max-size-time={int(60 * 1e9)}
+appsrc name=source is-live=True ! tee name=t t. ! 
+    queue ! videoconvert ! x264enc ! h264parse ! splitmuxsink name=splitmuxsink max-size-time={int(10 * 1e9)} t. !
+    queue ! videoconvert ! autovideosink sync=false async-handling=True
 '''
 
 image_arr = None
@@ -162,7 +164,7 @@ class WebRTCClient:
             if self.pipe_record_video == None:
                 self.init_pipe_record()
 
-            metadata, self.image_arr = detector.posenet_detect(self.arr)
+            metadata, self.image_arr = detector.holistic_detect(self.arr)
         # threading.Thread(target=self.process_buffer).start()
         # self.image_arr = self.arr
         # print("====> Time to process a frame: ",
@@ -236,6 +238,7 @@ class WebRTCClient:
         print("name", name)
         if name.startswith('video'):
             print("STREAM VIDEO")
+
             q = Gst.ElementFactory.make('queue')
             q.set_property('leaky', 'downstream')
             # capsfilter = Gst.ElementFactory.make('capsfilter')
@@ -261,8 +264,8 @@ class WebRTCClient:
             
             self.pipe.add(q)
             self.pipe.add(conv)
-            # self.pipe.add(r)
             self.pipe.add(sink)
+
             self.pipe.sync_children_states()
             pad.link(q.get_static_pad('sink'))
             q.link(conv)
